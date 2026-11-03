@@ -10,7 +10,17 @@
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true
+	"upload_source_maps": true,
+	"d1_databases": [
+		{
+			"binding": "office_attendance_db",
+			"database_name": "office-attendance-db",
+			"database_id": "ee1413ec-587e-42ae-b163-76b55b6f6572"
+		}
+	],
+	"triggers": {
+		"crons": ["0 0 * * *"]
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
