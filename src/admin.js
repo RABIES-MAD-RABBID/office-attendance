@@ -288,7 +288,7 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 
 	const employeeRowsHTML = employees.map(emp => `
 		<tr class="border-b ${emp.status === 'terminated' ? 'bg-red-50 opacity-75' : ''} text-sm">
-			<td class="p-3 font-semibold">${emp.full_name} <span class="text-xs font-normal text-gray-500 block">${emp.division || 'Unassigned'} | ${emp.status.toUpperCase()}</span></td>
+			<td class="p-3 font-semibold whitespace-nowrap">${emp.full_name} <span class="text-xs font-normal text-gray-500 block">${emp.division || 'Unassigned'} | ${emp.status.toUpperCase()}</span></td>
 			<td class="p-3 text-xs font-mono">${emp.emp_number}</td>
 			<td class="p-3 flex gap-2">
 				${emp.status === 'active' ? `
@@ -301,22 +301,23 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 
 	const auditRowsHTML = auditLogs.map(log => `
 		<tr class="border-b text-sm">
-			<td class="p-2">${new Date(log.timestamp + 'Z').toLocaleString("en-US", {timeZone: "Africa/Nairobi"})}</td>
+			<td class="p-2 whitespace-nowrap">${new Date(log.timestamp + 'Z').toLocaleString("en-US", {timeZone: "Africa/Nairobi"})}</td>
 			<td class="p-2 font-bold">${log.action}</td>
-			<td class="p-2">${log.target_employee}</td>
-			<td class="p-2 text-gray-600">${log.details}</td>
+			<td class="p-2 whitespace-nowrap">${log.target_employee}</td>
+			<td class="p-2 text-gray-600 min-w-[200px]">${log.details}</td>
 		</tr>
 	`).join('');
 
 	const locationRows = locations.map(loc => `
 		<div class="bg-gray-50 p-4 rounded border text-sm mb-3">
-			<div class="flex justify-between items-start">
-				<div>
-					<strong class="text-base">${loc.name}</strong> — ${loc.radius_meters}m radius<br>
-					<span class="text-xs text-gray-500 block mt-1">GPS: ${loc.latitude}, ${loc.longitude}</span>
-					<span class="text-xs text-gray-500 block">IP: ${loc.allowed_ips}</span>
+			<div class="flex justify-between items-start gap-2">
+				<div class="overflow-hidden">
+					<strong class="text-base truncate block">${loc.name}</strong>
+					<span class="text-xs text-gray-500 block mt-1">Radius: ${loc.radius_meters}m</span>
+					<span class="text-xs text-gray-500 block">GPS: ${loc.latitude}, ${loc.longitude}</span>
+					<span class="text-xs text-gray-500 block truncate" title="${loc.allowed_ips}">IP: ${loc.allowed_ips}</span>
 				</div>
-				<button hx-post="/admin/location/delete" hx-vals='{"id": "${loc.id}", "name": "${loc.name}"}' hx-confirm="Are you sure you want to delete the ${loc.name} location?" class="bg-red-100 text-red-600 px-3 py-1 rounded text-xs font-bold hover:bg-red-200 transition-colors">
+				<button hx-post="/admin/location/delete" hx-vals='{"id": "${loc.id}", "name": "${loc.name}"}' hx-confirm="Are you sure you want to delete the ${loc.name} location?" class="bg-red-100 text-red-600 px-3 py-1 rounded text-xs font-bold hover:bg-red-200 transition-colors shrink-0">
 					Delete
 				</button>
 			</div>
@@ -328,7 +329,7 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 	<html lang="en">
 	<head>
 		<meta charset="UTF-8">
-		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 		<title>HR Admin Dashboard</title>
 		<script src="https://unpkg.com/htmx.org@1.9.10"></script>
 		<script src="https://cdn.tailwindcss.com"></script>
@@ -345,6 +346,15 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 				document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
 				document.getElementById(tabId).classList.add('active');
 				document.getElementById('btn-' + tabId).classList.add('active');
+				toggleMobileMenu(true);
+			}
+			function toggleMobileMenu(forceClose = false) {
+				const sidebar = document.getElementById('sidebar');
+				if (forceClose) {
+					sidebar.classList.add('-translate-x-full');
+				} else {
+					sidebar.classList.toggle('-translate-x-full');
+				}
 			}
 			async function autoGatherNetwork() {
 				const btn = document.getElementById('gather-btn');
@@ -356,7 +366,12 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 						document.getElementById('loc_lon').value = pos.coords.longitude;
 						btn.innerText = "Auto-Gather Complete!";
 						setTimeout(() => btn.innerText = "Auto-Gather Current GPS & IP", 2000);
-					}, () => alert("GPS Permission denied."));
+					}, () => {
+						alert("GPS Permission denied.");
+						btn.innerText = "Auto-Gather Current GPS & IP";
+					});
+				} else {
+					btn.innerText = "Geolocation not supported";
 				}
 			}
 			document.addEventListener('keydown', function(event){
@@ -364,14 +379,27 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 			});
 		</script>
 	</head>
-	<body class="bg-gray-100 flex h-screen overflow-hidden">
-		
-		<aside class="w-64 bg-gray-900 text-gray-300 flex flex-col shadow-xl z-10">
-			<div class="p-6 bg-gray-950 border-b border-gray-800">
-				<h2 class="text-xl font-bold text-white tracking-tight">ICT HR Portal</h2>
-				<p class="text-xs text-gray-500 mt-1">Infrastructure Division</p>
+<body class="bg-gray-100 flex flex-col md:flex-row h-[100dvh] overflow-hidden overscroll-none">		
+		<!-- Mobile Header -->
+		<div class="md:hidden bg-gray-950 text-white flex justify-between items-center p-4 z-20 shadow-md">
+			<div class="font-bold text-lg tracking-tight">ICT HR Portal</div>
+			<button onclick="toggleMobileMenu()" class="focus:outline-none hover:text-gray-300 transition-colors p-2">
+				<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+			</button>
+		</div>
+
+		<!-- Sidebar -->
+		<aside id="sidebar" class="w-64 bg-gray-900 text-gray-300 flex flex-col shadow-xl z-30 fixed inset-y-0 left-0 transform -translate-x-full md:relative md:translate-x-0 transition duration-200 ease-in-out">
+			<div class="p-6 bg-gray-950 border-b border-gray-800 flex justify-between items-center">
+				<div>
+					<h2 class="text-xl font-bold text-white tracking-tight">ICT HR Portal</h2>
+					<p class="text-xs text-gray-500 mt-1">Infrastructure Division</p>
+				</div>
+				<button onclick="toggleMobileMenu(true)" class="md:hidden text-gray-400 hover:text-white p-1">
+					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+				</button>
 			</div>
-			<nav class="flex-1 py-4 space-y-1">
+			<nav class="flex-1 py-4 space-y-1 overflow-y-auto">
 				<button id="btn-view-daily" onclick="switchTab('view-daily')" class="nav-btn active w-full flex items-center text-left px-6 py-3 text-sm font-medium hover:bg-gray-800 transition-colors">Daily Overview</button>
 				<button id="btn-view-heatmap" onclick="switchTab('view-heatmap')" class="nav-btn w-full flex items-center text-left px-6 py-3 text-sm font-medium hover:bg-gray-800 transition-colors">Monthly Heatmap</button>
 				<button id="btn-view-security" onclick="switchTab('view-security')" class="nav-btn w-full flex items-center text-left px-6 py-3 text-sm font-medium hover:bg-gray-800 transition-colors">Personnel & Security</button>
@@ -382,17 +410,17 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 			</div>
 		</aside>
 
-		<main class="flex-1 overflow-y-auto p-8 relative">
-			
-			<div id="view-daily" class="view-section active space-y-6">
-				<div class="flex justify-between items-center">
-					<h1 class="text-2xl font-bold text-gray-800">Today's Activity</h1>
-					<span class="bg-white border text-gray-600 px-4 py-2 rounded shadow-sm text-sm font-bold">${todayStr}</span>
+		<!-- Main Content -->
+<main class="flex-1 overflow-y-auto p-4 md:p-8 relative w-full pb-24 overscroll-contain">			
+			<div id="view-daily" class="view-section active space-y-4 md:space-y-6">
+				<div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-2">
+					<h1 class="text-xl md:text-2xl font-bold text-gray-800">Today's Activity</h1>
+					<span class="bg-white border text-gray-600 px-3 py-1.5 md:px-4 md:py-2 rounded shadow-sm text-sm font-bold">${todayStr}</span>
 				</div>
 
-				<div class="bg-white p-6 rounded-xl shadow border border-gray-200">
+				<div class="bg-white p-4 md:p-6 rounded-xl shadow border border-gray-200">
 					<h2 class="text-lg font-bold mb-3 text-gray-800">Generate HR Attendance Report</h2>
-					<form action="/admin/export" method="GET" class="flex flex-wrap gap-4 items-end">
+					<form action="/admin/export" method="GET" class="flex flex-col md:flex-row flex-wrap gap-4 items-end">
 						<div class="w-full md:w-1/3">
 							<label class="block text-gray-700 text-xs font-bold mb-2">Select Target Data</label>
 							<select name="target" class="border p-2 w-full rounded bg-gray-50 text-sm">
@@ -407,15 +435,15 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 								</optgroup>
 							</select>
 						</div>
-						<div class="flex-1 min-w-[12rem]">
+						<div class="w-full md:flex-1 md:min-w-[12rem]">
 							<label class="block text-gray-700 text-xs font-bold mb-2">Start Date</label>
 							<input type="date" name="start_date" value="${todayStr}" max="${todayStr}" required class="border p-2 w-full rounded bg-gray-50 text-sm">
 						</div>
-						<div class="flex-1 min-w-[12rem]">
+						<div class="w-full md:flex-1 md:min-w-[12rem]">
 							<label class="block text-gray-700 text-xs font-bold mb-2">End Date</label>
 							<input type="date" name="end_date" value="${todayStr}" max="${todayStr}" required class="border p-2 w-full rounded bg-gray-50 text-sm">
 						</div>
-						<button type="submit" class="bg-green-600 text-white px-6 py-2 rounded shadow-sm text-sm font-bold hover:bg-green-700 transition-colors">
+						<button type="submit" class="w-full md:w-auto bg-green-600 text-white px-6 py-2 rounded shadow-sm text-sm font-bold hover:bg-green-700 transition-colors mt-2 md:mt-0">
 							Download Clean CSV
 						</button>
 					</form>
@@ -423,19 +451,21 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 
 				<div class="bg-white rounded-xl shadow overflow-hidden">
 					<div class="p-4 bg-gray-50 border-b font-bold text-gray-700 text-sm">Raw Live Feed (Today)</div>
-					<table class="w-full text-left whitespace-nowrap">
-						<thead class="bg-gray-100 border-b"><tr class="text-gray-600"><th class="p-4">Time</th><th class="p-4">Employee</th><th class="p-4">Action</th><th class="p-4">Status</th><th class="p-4">Details</th></tr></thead>
-						<tbody>${dailyRowsHTML || '<tr><td colspan="5" class="p-8 text-center text-gray-400">No activity logged today.</td></tr>'}</tbody>
-					</table>
+					<div class="overflow-x-auto">
+						<table class="w-full text-left whitespace-nowrap min-w-[600px]">
+							<thead class="bg-gray-100 border-b"><tr class="text-gray-600"><th class="p-4">Time</th><th class="p-4">Employee</th><th class="p-4">Action</th><th class="p-4">Status</th><th class="p-4">Details</th></tr></thead>
+							<tbody>${dailyRowsHTML || '<tr><td colspan="5" class="p-8 text-center text-gray-400">No activity logged today.</td></tr>'}</tbody>
+						</table>
+					</div>
 				</div>
 			</div>
 
-			<div id="view-heatmap" class="view-section space-y-6">
-				<div class="flex justify-between items-center mb-2">
-					<h1 class="text-2xl font-bold text-gray-800">Attendance Heatmap</h1>
-					<span class="bg-white border text-gray-600 px-4 py-2 rounded shadow-sm text-sm font-bold">${monthName}</span>
+			<div id="view-heatmap" class="view-section space-y-4 md:space-y-6">
+				<div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 mb-2">
+					<h1 class="text-xl md:text-2xl font-bold text-gray-800">Attendance Heatmap</h1>
+					<span class="bg-white border text-gray-600 px-3 py-1.5 md:px-4 md:py-2 rounded shadow-sm text-sm font-bold">${monthName}</span>
 				</div>
-				<div class="flex gap-4 text-xs font-semibold text-gray-600 bg-white px-4 py-2 rounded shadow-sm mb-4 border inline-flex">
+				<div class="flex flex-wrap gap-2 md:gap-4 text-xs font-semibold text-gray-600 bg-white p-3 md:px-4 md:py-2 rounded shadow-sm mb-4 border">
 					<div class="flex items-center gap-1"><div class="w-3 h-3 bg-green-500 rounded-sm"></div> Attended</div>
 					<div class="flex items-center gap-1"><div class="w-3 h-3 bg-blue-400 rounded-sm"></div> Workshop</div>
 					<div class="flex items-center gap-1"><div class="w-3 h-3 bg-yellow-400 rounded-sm"></div> Leave</div>
@@ -445,43 +475,47 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 				${calendarHTML}
 			</div>
 
-			<div id="view-security" class="view-section space-y-6">
-				<h1 class="text-2xl font-bold text-gray-800">Personnel & Security</h1>
-				<div class="grid grid-cols-1 xl:grid-cols-2 gap-8">
-					<div class="bg-white p-6 rounded-xl shadow overflow-y-auto h-96">
-						<h2 class="text-lg font-bold mb-4">Device Management</h2>
-						<table class="w-full text-left">
-							<thead><tr class="bg-gray-50 border-b"><th class="p-3">Name & Div</th><th class="p-3">ID</th><th class="p-3">Action</th></tr></thead>
-							<tbody>${employeeRowsHTML}</tbody>
-						</table>
+			<div id="view-security" class="view-section space-y-4 md:space-y-6">
+				<h1 class="text-xl md:text-2xl font-bold text-gray-800">Personnel & Security</h1>
+				<div class="grid grid-cols-1 xl:grid-cols-2 gap-6 md:gap-8">
+					<div class="bg-white p-4 md:p-6 rounded-xl shadow h-96 flex flex-col">
+						<h2 class="text-lg font-bold mb-4 shrink-0">Device Management</h2>
+						<div class="overflow-auto flex-1">
+							<table class="w-full text-left min-w-[500px]">
+								<thead><tr class="bg-gray-50 border-b"><th class="p-3">Name & Div</th><th class="p-3">ID</th><th class="p-3">Action</th></tr></thead>
+								<tbody>${employeeRowsHTML}</tbody>
+							</table>
+						</div>
 					</div>
-					<div class="bg-white p-6 rounded-xl shadow h-96 overflow-y-auto border-l-4 border-red-600">
-						<h2 class="text-lg font-bold mb-4 text-red-800">Immutable Audit Ledger</h2>
-						<table class="w-full text-left">
-							<thead><tr class="bg-gray-50 border-b"><th class="p-2">Time</th><th class="p-2">Action</th><th class="p-2">Target</th><th class="p-2">Details</th></tr></thead>
-							<tbody>${auditRowsHTML}</tbody>
-						</table>
+					<div class="bg-white p-4 md:p-6 rounded-xl shadow h-96 flex flex-col border-l-4 border-red-600">
+						<h2 class="text-lg font-bold mb-4 text-red-800 shrink-0">Immutable Audit Ledger</h2>
+						<div class="overflow-auto flex-1">
+							<table class="w-full text-left min-w-[500px]">
+								<thead><tr class="bg-gray-50 border-b"><th class="p-2">Time</th><th class="p-2">Action</th><th class="p-2">Target</th><th class="p-2">Details</th></tr></thead>
+								<tbody>${auditRowsHTML}</tbody>
+							</table>
+						</div>
 					</div>
 				</div>
 			</div>
 
-			<div id="view-settings" class="view-section space-y-6">
-				<h1 class="text-2xl font-bold text-gray-800">Network & Geofence Setup</h1>
-				<div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-					<div class="bg-white p-6 rounded-xl shadow h-[32rem] overflow-y-auto">
+			<div id="view-settings" class="view-section space-y-4 md:space-y-6">
+				<h1 class="text-xl md:text-2xl font-bold text-gray-800">Network & Geofence Setup</h1>
+				<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 md:gap-8">
+					<div class="bg-white p-4 md:p-6 rounded-xl shadow h-auto md:h-[32rem] overflow-y-auto">
 						<h2 class="text-lg font-bold mb-4">Active Locations</h2>
 						${locationRows || '<div class="text-gray-500 text-sm mt-4">No active locations set.</div>'}
 					</div>
-					<div class="bg-white p-6 rounded-xl shadow h-[32rem]">
+					<div class="bg-white p-4 md:p-6 rounded-xl shadow h-auto md:h-[32rem] flex flex-col">
 						<h2 class="text-lg font-bold mb-4">Add New Location</h2>
 						<button id="gather-btn" type="button" onclick="autoGatherNetwork()" class="mb-4 w-full bg-gray-800 text-white text-xs font-bold py-3 rounded shadow hover:bg-gray-700 transition-colors">
 							Auto-Gather Current GPS & IP
 						</button>
-						<form hx-post="/admin/location" class="space-y-4 text-sm">
+						<form hx-post="/admin/location" class="space-y-4 text-sm flex-1">
 							<input type="text" name="name" placeholder="Office Name (e.g. Field Office 2)" required class="border p-3 w-full rounded">
-							<div class="flex gap-2">
-								<input type="number" step="any" id="loc_lat" name="latitude" placeholder="Latitude" required class="border p-3 w-1/2 rounded bg-gray-50">
-								<input type="number" step="any" id="loc_lon" name="longitude" placeholder="Longitude" required class="border p-3 w-1/2 rounded bg-gray-50">
+							<div class="flex flex-col sm:flex-row gap-2 sm:gap-4">
+								<input type="number" step="any" id="loc_lat" name="latitude" placeholder="Latitude" required class="border p-3 w-full sm:w-1/2 rounded bg-gray-50">
+								<input type="number" step="any" id="loc_lon" name="longitude" placeholder="Longitude" required class="border p-3 w-full sm:w-1/2 rounded bg-gray-50">
 							</div>
 							<input type="number" name="radius" placeholder="Radius (Meters)" value="50" required class="border p-3 w-full rounded">
 							<input type="text" id="loc_ip" name="allowed_ips" placeholder="Router IP" required class="border p-3 w-full rounded bg-gray-50">
@@ -492,10 +526,10 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 			</div>
 
 			<!-- MODAL CONTAINER -->
-			<div id="calendar-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 hidden z-50 flex items-center justify-center transition-opacity">
-				<div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden relative m-4">
-					<button onclick="document.getElementById('calendar-modal').classList.add('hidden')" class="absolute top-4 right-5 text-gray-400 hover:text-red-500 text-3xl font-bold leading-none">&times;</button>
-					<div id="modal-content" class="p-8">
+			<div id="calendar-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 hidden z-50 flex items-center justify-center transition-opacity p-4">
+				<div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto relative">
+					<button onclick="document.getElementById('calendar-modal').classList.add('hidden')" class="absolute top-4 right-5 text-gray-400 hover:text-red-500 text-3xl font-bold leading-none z-10">&times;</button>
+					<div id="modal-content" class="p-4 md:p-8">
 						<div class="flex justify-center items-center h-64"><span class="animate-pulse text-gray-500 font-bold">Loading Calendar...</span></div>
 					</div>
 				</div>

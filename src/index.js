@@ -29,6 +29,7 @@ export default {
 			
 			let viewState = 'register';
 			let hasSignedInToday = false;
+			let activeException = null; // New variable to track active leave/workshops
 			
 			if (deviceToken) {
 				const activeEmp = await db.prepare("SELECT * FROM employees WHERE device_token = ? AND status = 'active'").bind(deviceToken).first();
@@ -42,10 +43,19 @@ export default {
 					`).bind(activeEmp.emp_number).first();
 					
 					if (existingLog) hasSignedInToday = true;
+
+					// Check if there is an ongoing exception for the current EAT date
+					activeException = await db.prepare(`
+						SELECT * FROM status_exceptions
+						WHERE emp_number = ? 
+						AND date('now', '+3 hours') >= start_date 
+						AND date('now', '+3 hours') <= end_date
+					`).bind(activeEmp.emp_number).first();
 				}
 			}
 
-			const response = new Response(getAppHTML(viewState, nonce, hasSignedInToday), {
+			// Pass activeException to the HTML generator
+			const response = new Response(getAppHTML(viewState, nonce, hasSignedInToday, activeException), {
 				headers: { "Content-Type": "text/html;charset=UTF-8" },
 			});
 
@@ -206,7 +216,7 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 	return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-function getAppHTML(viewState, nonce, hasSignedInToday = false) {
+function getAppHTML(viewState, nonce, hasSignedInToday = false, activeException = null) {
 	const registerForm = `
 		<h1 class="text-2xl font-bold mb-2 text-gray-800">Device Registration</h1>
 		<form hx-post="/api/register" hx-target="#form-container" class="space-y-4 text-left">
@@ -227,62 +237,82 @@ function getAppHTML(viewState, nonce, hasSignedInToday = false) {
 		</form>
 	`;
 
-	const eatDate = new Date(new Date().toLocaleString("en-US", {timeZone: "Africa/Nairobi"}));
-	const hour = eatDate.getHours();
-	
-	const canSignIn = hour >= 4 && hour < 17;
-	const canSignOut = hour >= 17 || hour < 4;
+	let attendanceForm = '';
 
-	let actionButtonsHTML = '';
-	let statusHintHTML = '';
-
-	if (canSignIn) {
-		if (hasSignedInToday) {
-			actionButtonsHTML = `<div class="w-full bg-gray-100 text-gray-500 px-2 py-4 rounded-lg font-bold shadow-inner border text-center">Already Signed In Today</div>`;
-			statusHintHTML = `<p class="text-xs text-gray-500 mt-3 text-center">Sign-out will become available at 17:00 EAT.</p>`;
-		} else {
-			actionButtonsHTML = `<button onclick="logLocation('SIGN_IN')" class="bg-green-600 text-white px-2 py-4 rounded-lg font-bold hover:bg-green-700 w-full shadow-lg transition-transform active:scale-95">SIGN IN</button>`;
-		}
-	} else if (canSignOut) {
-		actionButtonsHTML = `<button onclick="logLocation('SIGN_OUT')" class="bg-red-600 text-white px-2 py-4 rounded-lg font-bold hover:bg-red-700 w-full shadow-lg transition-transform active:scale-95">SIGN OUT</button>`;
-		statusHintHTML = `<p class="text-xs text-gray-500 mt-3 text-center">Sign-in for the next shift becomes available at 04:00 EAT.</p>`;
-	}
-
-	const attendanceForm = `
-		<h1 class="text-2xl font-bold mb-4 text-gray-800">Office Attendance</h1>
-		<div id="status-message" class="mb-4 text-gray-600 text-sm h-12 flex items-center justify-center">Ensure you are connected to the office Wi-Fi and allow location access.</div>
-		
-		<form id="attendance-form" hx-post="/api/log" hx-target="#status-message" class="hidden">
-			<input type="hidden" name="auth_nonce" value="${nonce}">
-			<input type="hidden" name="latitude" id="lat">
-			<input type="hidden" name="longitude" id="lon">
-			<input type="hidden" name="action_type" id="action_type">
-		</form>
-		
-		<div class="w-full mt-2">
-			${actionButtonsHTML}
-		</div>
-		${statusHintHTML}
-		
-		<hr class="my-6 border-gray-200">
-
-		<div id="exception-section" class="text-left bg-gray-50 p-4 rounded-lg border border-gray-200">
-			<h2 class="text-lg font-bold text-gray-800 mb-2">Out of Office / Leave</h2>
-			<form hx-post="/api/exception" hx-target="#exception-section" class="space-y-3">
-				<select name="type" required class="shadow border rounded w-full py-2 px-3 text-sm bg-white">
-					<option value="Workshop/Inspection">Workshop / Inspection</option>
-					<option value="Sick Leave">Sick Leave</option>
-					<option value="Annual Leave">Annual / Work Leave</option>
-				</select>
-				<div class="flex gap-4">
-					<input type="date" name="start_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
-					<input type="date" name="end_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
+	// IF EXCEPTION IS ACTIVE: Render locked UI
+	if (activeException) {
+		attendanceForm = `
+			<h1 class="text-2xl font-bold mb-4 text-gray-800">Status: Out of Office</h1>
+			<div class="bg-blue-50 border border-blue-200 p-6 rounded-lg text-left mb-4 shadow-sm">
+				<div class="flex items-center gap-3 mb-2">
+					<div class="w-3 h-3 bg-blue-500 rounded-full animate-pulse"></div>
+					<h2 class="text-lg font-bold text-blue-900">${activeException.type}</h2>
 				</div>
-				<input type="text" name="description" class="shadow border rounded w-full py-2 px-3 text-sm" placeholder="Description or Notified Person">
-				<button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold w-full text-sm mt-2">Submit Status</button>
+				<p class="text-sm text-blue-800 mt-2">You are currently excused from standard office attendance logging.</p>
+				<p class="text-sm text-blue-800 mt-1">Valid through: <span class="font-bold">${activeException.end_date}</span></p>
+				${activeException.description ? `<p class="text-xs text-blue-600 mt-3 p-2 bg-blue-100/50 rounded italic">Details: ${activeException.description}</p>` : ''}
+			</div>
+			<p class="text-xs text-gray-500 mt-4">Attendance and leave requests are disabled until this period expires.</p>
+		`;
+	} else {
+		// IF NO EXCEPTION: Render standard logging UI
+		const eatDate = new Date(new Date().toLocaleString("en-US", {timeZone: "Africa/Nairobi"}));
+		const hour = eatDate.getHours();
+		
+		const canSignIn = hour >= 4 && hour < 17;
+		const canSignOut = hour >= 17 || hour < 4;
+
+		let actionButtonsHTML = '';
+		let statusHintHTML = '';
+
+		if (canSignIn) {
+			if (hasSignedInToday) {
+				actionButtonsHTML = `<div class="w-full bg-gray-100 text-gray-500 px-2 py-4 rounded-lg font-bold shadow-inner border text-center">Already Signed In Today</div>`;
+				statusHintHTML = `<p class="text-xs text-gray-500 mt-3 text-center">Sign-out will become available at 17:00 EAT.</p>`;
+			} else {
+				actionButtonsHTML = `<button onclick="logLocation('SIGN_IN')" class="bg-green-600 text-white px-2 py-4 rounded-lg font-bold hover:bg-green-700 w-full shadow-lg transition-transform active:scale-95">SIGN IN</button>`;
+			}
+		} else if (canSignOut) {
+			actionButtonsHTML = `<button onclick="logLocation('SIGN_OUT')" class="bg-red-600 text-white px-2 py-4 rounded-lg font-bold hover:bg-red-700 w-full shadow-lg transition-transform active:scale-95">SIGN OUT</button>`;
+			statusHintHTML = `<p class="text-xs text-gray-500 mt-3 text-center">Sign-in for the next shift becomes available at 04:00 EAT.</p>`;
+		}
+
+		attendanceForm = `
+			<h1 class="text-2xl font-bold mb-4 text-gray-800">Office Attendance</h1>
+			<div id="status-message" class="mb-4 text-gray-600 text-sm h-12 flex items-center justify-center">Ensure you are connected to the office Wi-Fi and allow location access.</div>
+			
+			<form id="attendance-form" hx-post="/api/log" hx-target="#status-message" class="hidden">
+				<input type="hidden" name="auth_nonce" value="${nonce}">
+				<input type="hidden" name="latitude" id="lat">
+				<input type="hidden" name="longitude" id="lon">
+				<input type="hidden" name="action_type" id="action_type">
 			</form>
-		</div>
-	`;
+			
+			<div class="w-full mt-2">
+				${actionButtonsHTML}
+			</div>
+			${statusHintHTML}
+			
+			<hr class="my-6 border-gray-200">
+
+			<div id="exception-section" class="text-left bg-gray-50 p-4 rounded-lg border border-gray-200">
+				<h2 class="text-lg font-bold text-gray-800 mb-2">Out of Office / Leave</h2>
+				<form hx-post="/api/exception" hx-target="#exception-section" class="space-y-3">
+					<select name="type" required class="shadow border rounded w-full py-2 px-3 text-sm bg-white">
+						<option value="Workshop/Inspection">Workshop / Inspection</option>
+						<option value="Sick Leave">Sick Leave</option>
+						<option value="Annual Leave">Annual / Work Leave</option>
+					</select>
+					<div class="flex gap-4">
+						<input type="date" name="start_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
+						<input type="date" name="end_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
+					</div>
+					<input type="text" name="description" class="shadow border rounded w-full py-2 px-3 text-sm" placeholder="Description or Notified Person">
+					<button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold w-full text-sm mt-2">Submit Status</button>
+				</form>
+			</div>
+		`;
+	}
 
 	return `
 	<!DOCTYPE html>
