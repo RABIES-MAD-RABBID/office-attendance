@@ -3,24 +3,12 @@ import { handleAdmin } from './admin.js';
 export default {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
-		if (url.pathname.startsWith("/admin")) return await handleAdmin(request, env, url);
-
 		const db = env.office_attendance_db;
-
-		if (url.pathname === "/api/my-ip") {
-			return new Response(request.headers.get("CF-Connecting-IP") || "Local_Test_IP");
-		}
-
-		if (url.pathname === "/manifest.json") {
-			return new Response(JSON.stringify({
-				name: "Attendance", start_url: "/", display: "standalone", theme_color: "#2563eb",
-				icons: [{ src: "https://upload.wikimedia.org/wikipedia/commons/4/4e/Building_icon.svg", sizes: "512x512", type: "image/svg+xml" }]
-			}), { headers: { "Content-Type": "application/json" } });
-		}
-
+		const ipAddress = request.headers.get("cf-connecting-ip") || "Local_Test_IP";
+		
 		const cookieHeader = request.headers.get("Cookie") || "";
-		const tokenMatch = cookieHeader.match(/device_token=([^;]+)/);
-		const deviceToken = tokenMatch ? tokenMatch[1] : null;
+		const deviceTokenMatch = cookieHeader.match(/device_token=([^;]+)/);
+		const deviceToken = deviceTokenMatch ? deviceTokenMatch[1] : null;
 
 		// --- GET ROOT: UI & State Handling ---
 		if (url.pathname === "/" && request.method === "GET") {
@@ -29,22 +17,25 @@ export default {
 			
 			let viewState = 'register';
 			let hasSignedInToday = false;
-			let activeException = null; // New variable to track active leave/workshops
+			let hasSignedOutToday = false;
+			let activeException = null;
 			
 			if (deviceToken) {
 				const activeEmp = await db.prepare("SELECT * FROM employees WHERE device_token = ? AND status = 'active'").bind(deviceToken).first();
 				if (activeEmp) {
 					viewState = 'attendance';
 					
-					const existingLog = await db.prepare(`
-						SELECT * FROM attendance_logs 
-						WHERE emp_number = ? AND action_type = 'SIGN_IN' AND verified = 1
+					const todayLogs = await db.prepare(`
+						SELECT action_type FROM attendance_logs 
+						WHERE emp_number = ? AND verified = 1
 						AND date(timestamp, '+3 hours') = date('now', '+3 hours')
-					`).bind(activeEmp.emp_number).first();
+					`).bind(activeEmp.emp_number).all();
 					
-					if (existingLog) hasSignedInToday = true;
+					if (todayLogs && todayLogs.results) {
+						hasSignedInToday = todayLogs.results.some(l => l.action_type === 'SIGN_IN');
+						hasSignedOutToday = todayLogs.results.some(l => l.action_type === 'SIGN_OUT');
+					}
 
-					// Check if there is an ongoing exception for the current EAT date
 					activeException = await db.prepare(`
 						SELECT * FROM status_exceptions
 						WHERE emp_number = ? 
@@ -54,8 +45,7 @@ export default {
 				}
 			}
 
-			// Pass activeException to the HTML generator
-			const response = new Response(getAppHTML(viewState, nonce, hasSignedInToday, activeException), {
+			const response = new Response(getAppHTML(viewState, nonce, hasSignedInToday, activeException, hasSignedOutToday), {
 				headers: { "Content-Type": "text/html;charset=UTF-8" },
 			});
 
@@ -66,157 +56,164 @@ export default {
 			return response;
 		}
 
-		// --- POST REGISTER ---
-		if (url.pathname === "/api/register" && request.method === "POST") {
-			const formData = await request.formData();
-			const fullName = `${formData.get("first_name")} ${formData.get("last_name")}`.trim();
-			const division = formData.get("division");
-			
-			const existing = await db.prepare("SELECT * FROM employees WHERE LOWER(full_name) = LOWER(?)").bind(fullName).first();
-			
-			if (existing) {
-				if (existing.status === 'terminated') {
-					const newToken = crypto.randomUUID();
-					await db.prepare("UPDATE employees SET device_token = ?, status = 'active', division = ? WHERE emp_number = ?").bind(newToken, division, existing.emp_number).run();
-					return new Response(`<div class='text-green-600 font-bold mb-4'>Account reactivated!</div><a href="/" class="bg-gray-800 text-white px-4 py-2 rounded mt-4 inline-block">Continue</a>`,
-						{ headers: { "Content-Type": "text/html", "Set-Cookie": `device_token=${newToken}; HttpOnly; Secure; Path=/; Max-Age=315360000` }});
-				} else if (!existing.device_token) {
-					const newToken = crypto.randomUUID();
-					await db.prepare("UPDATE employees SET device_token = ?, division = ? WHERE emp_number = ?").bind(newToken, division, existing.emp_number).run();
-					return new Response(`<div class='text-green-600 font-bold mb-4'>Device successfully re-bound!</div><a href="/" class="bg-gray-800 text-white px-4 py-2 rounded mt-4 inline-block">Continue</a>`,
-						{ headers: { "Content-Type": "text/html", "Set-Cookie": `device_token=${newToken}; HttpOnly; Secure; Path=/; Max-Age=315360000` }});
-				} else {
-					return new Response("<span class='text-red-600 font-bold'>Error: You are already registered on an active device. Contact Admin if phone was lost.</span>", { status: 400 });
-				}
-			}
-
-			const generatedEmpNumber = 'ID-' + crypto.randomUUID().split('-')[0].toUpperCase();
-			const newToken = crypto.randomUUID();
-			await db.prepare("INSERT INTO employees (emp_number, full_name, device_token, division) VALUES (?, ?, ?, ?)").bind(generatedEmpNumber, fullName, newToken, division).run();
-
-			return new Response(`<div class='text-green-600 font-bold mb-4'>Device securely bound!</div><a href="/" class="bg-gray-800 text-white px-4 py-2 rounded mt-4 inline-block">Continue</a>`,
-				{ headers: { "Content-Type": "text/html", "Set-Cookie": `device_token=${newToken}; HttpOnly; Secure; Path=/; Max-Age=315360000` }});
+		// --- GET IP API (For Admin Dashboard Auto-Gather) ---
+		if (url.pathname === "/api/my-ip" && request.method === "GET") {
+			return new Response(ipAddress, { headers: { "Content-Type": "text/plain" } });
 		}
 
-		// --- POST LOG: GPS & Network Verification ---
-		if (url.pathname === "/api/log" && request.method === "POST") {
-			if (!deviceToken) return new Response("<span class='text-red-600 font-bold'>Unauthorized. No token found.</span>");
-			const employee = await db.prepare("SELECT * FROM employees WHERE device_token = ? AND status = 'active'").bind(deviceToken).first();
-			if (!employee) return new Response("<span class='text-red-600 font-bold'>Device unrecognized or account terminated.</span>");
-
+		// --- POST REGISTER: Device Binding & Anti-Spoofing ---
+		if (url.pathname === "/api/register" && request.method === "POST") {
 			const formData = await request.formData();
-			const submittedNonce = formData.get("auth_nonce");
-			const actionType = formData.get("action_type");
+			const firstName = formData.get("first_name").trim();
+			const lastName = formData.get("last_name").trim();
+			const submittedDivision = formData.get("division");
 			
-			const eatDate = new Date(new Date().toLocaleString("en-US", {timeZone: "Africa/Nairobi"}));
-			const currentHour = eatDate.getHours();
+			const fullName = `${firstName} ${lastName}`.replace(/\s+/g, ' ');
+			const newToken = crypto.randomUUID();
 
-			if (actionType === 'SIGN_IN') {
-				if (currentHour >= 17 || currentHour < 4) {
-					return new Response("<span class='text-red-600 font-bold'>Sign-in is only allowed between 04:00 and 17:00 EAT.</span>");
+			const existingEmp = await db.prepare("SELECT * FROM employees WHERE full_name = ? COLLATE NOCASE").bind(fullName).first();
+
+			if (existingEmp) {
+				if (existingEmp.status === 'terminated') {
+					return new Response(`<span class="text-red-600 font-bold block mt-4 text-center">Registration Denied:<br>Account is terminated.</span>`, { status: 403 });
 				}
-				const existingLog = await db.prepare(`SELECT * FROM attendance_logs WHERE emp_number = ? AND action_type = 'SIGN_IN' AND verified = 1 AND date(timestamp, '+3 hours') = date('now', '+3 hours')`).bind(employee.emp_number).first();
-				if (existingLog) return new Response("<div class='text-amber-600 font-bold text-lg mb-2'>⚠️ Already Signed In</div><div class='text-gray-500 text-sm'>You have already signed in for today.</div>", { headers: { "Content-Type": "text/html" } });
-			}
-
-			if (actionType === 'SIGN_OUT') {
-				if (currentHour >= 4 && currentHour < 17) {
-					return new Response("<span class='text-red-600 font-bold'>Sign-out is only allowed after 17:00 EAT.</span>");
+				if (existingEmp.device_token !== null) {
+					return new Response(`<span class="text-red-600 font-bold block mt-4 text-center">Registration Denied:<br>Name is already bound to an active device.</span>`, { status: 403 });
 				}
+				
+				// RE-ATTACHMENT SCENARIO (Detached but Active)
+				await db.prepare("UPDATE employees SET device_token = ? WHERE emp_number = ?").bind(newToken, existingEmp.emp_number).run();
+				
+				return new Response(`<span class="text-green-600 font-bold block mt-4 text-center">Device Re-attached.<br>Refreshing...</span>`, {
+					headers: {
+						"Content-Type": "text/html",
+						"Set-Cookie": `device_token=${newToken}; HttpOnly; Secure; Path=/; Max-Age=31536000`,
+						"HX-Refresh": "true"
+					}
+				});
+			} else {
+				// BRAND NEW USER SCENARIO
+				const newEmpNumber = "ID-" + crypto.randomUUID().split('-')[0].toUpperCase();
+				await db.prepare("INSERT INTO employees (emp_number, full_name, division, device_token, status) VALUES (?, ?, ?, ?, 'active')").bind(newEmpNumber, fullName, submittedDivision, newToken).run();
+				
+				return new Response(`<span class="text-green-600 font-bold block mt-4 text-center">Registration Successful.<br>Refreshing...</span>`, {
+					headers: {
+						"Content-Type": "text/html",
+						"Set-Cookie": `device_token=${newToken}; HttpOnly; Secure; Path=/; Max-Age=31536000`,
+						"HX-Refresh": "true"
+					}
+				});
 			}
+		}
 
-			const validNonce = await db.prepare("SELECT * FROM auth_nonces WHERE nonce = ? AND (julianday('now') - julianday(created_at)) * 86400 < 120").bind(submittedNonce).first();
-			if (!validNonce) return new Response("<span class='text-red-600 font-bold'>Session expired or tampered. Please refresh the page.</span>");
-			await db.prepare("DELETE FROM auth_nonces WHERE nonce = ?").bind(submittedNonce).run();
-			await db.prepare("DELETE FROM auth_nonces WHERE (julianday('now') - julianday(created_at)) * 86400 > 300").run();
-
-			// --- ANTI-SPAM COOLDOWN ---
-			const recentLog = await db.prepare(`
-				SELECT * FROM attendance_logs 
-				WHERE emp_number = ? AND (julianday('now') - julianday(timestamp)) * 1440 < 2
-			`).bind(employee.emp_number).first();
-			
-			if (recentLog) {
-				return new Response(
-					`<div class='text-amber-600 font-bold text-lg mb-2'>⚠️ Cooldown Active</div>
-					 <div class='text-gray-500 text-sm'>Please wait 2 minutes before attempting to log again to prevent system spam.</div>`, 
-					{ headers: { "Content-Type": "text/html" } }
-				);
-			}
-
+		// --- POST LOG: GPS & Wi-Fi Attendance Logic ---
+		if (url.pathname === "/api/log" && request.method === "POST") {
+			const formData = await request.formData();
 			const lat = parseFloat(formData.get("latitude"));
 			const lon = parseFloat(formData.get("longitude"));
-			const ipAddress = request.headers.get("CF-Connecting-IP") || "Local_Test_IP";
+			const actionType = formData.get("action_type");
+			const nonce = formData.get("auth_nonce");
+
+			const nonceCheck = await db.prepare("SELECT * FROM auth_nonces WHERE nonce = ?").bind(nonce).first();
+			if (!nonceCheck) return new Response("Invalid session.", { status: 403 });
+			await db.prepare("DELETE FROM auth_nonces WHERE nonce = ?").bind(nonce).run();
+
+			if (!deviceToken) return new Response("Unauthorized device.", { status: 401 });
+			const emp = await db.prepare("SELECT * FROM employees WHERE device_token = ? AND status = 'active'").bind(deviceToken).first();
+			if (!emp) return new Response("Invalid or terminated employee.", { status: 403 });
+			const empNumber = emp.emp_number;
 
 			const locations = await db.prepare("SELECT * FROM office_locations").all();
+			if (!locations.results || locations.results.length === 0) {
+				return new Response(`<span class="text-red-600 font-bold text-sm block">System error: No office locations configured. Contact IT.</span>`, { headers: { "Content-Type": "text/html" } });
+			}
+
 			let verified = 0;
 			let closestDistance = Infinity;
 			let activeLocationName = "Unknown";
 			let flagReason = "Location/Network mismatch";
+			let bestMatch = null;
 
 			for (const loc of locations.results) {
 				const dist = calculateDistance(lat, lon, loc.latitude, loc.longitude);
 				if (dist < closestDistance) closestDistance = dist;
 				
 				const allowedIpsArray = loc.allowed_ips.split(',').map(ip => ip.trim());
-				if (dist <= loc.radius_meters && (allowedIpsArray.includes(ipAddress) || ipAddress === "Local_Test_IP")) {
-					verified = 1;
-					flagReason = null;
-					activeLocationName = loc.name;
-					break; 
+				const ipMatches = ipAddress === "Local_Test_IP" || allowedIpsArray.some(allowedIp => {
+					if (allowedIp.endsWith('*')) return ipAddress.startsWith(allowedIp.slice(0, -1));
+					return ipAddress === allowedIp;
+				});
+
+				const strictGpsMatch = dist <= loc.radius_meters;
+				const networkDriftMatch = ipMatches && dist <= 2000;
+
+				if (strictGpsMatch || networkDriftMatch) {
+					if (!bestMatch || (ipMatches && !bestMatch.ipMatched) || (dist < bestMatch.dist)) {
+						bestMatch = { loc, dist, ipMatched: ipMatches };
+					}
 				}
 			}
 
-			if (verified === 0) flagReason = `GPS: ${Math.round(closestDistance)}m from nearest office | IP: ${ipAddress}`;
-
-			await db.prepare(
-				"INSERT INTO attendance_logs (emp_number, action_type, ip_address, latitude, longitude, distance_meters, verified, flag_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-			).bind(employee.emp_number, actionType, ipAddress, lat, lon, closestDistance, verified, flagReason).run();
-
-			const actionText = actionType === 'SIGN_IN' ? 'Signed in' : 'Signed out';
-
-			if (verified === 1) {
-				return new Response(`<div class='text-green-600 font-bold text-lg mb-2'>✅ ${actionText} successfully!</div><div class='text-gray-500 text-sm'>${employee.full_name} at ${activeLocationName}</div>`, { headers: { "Content-Type": "text/html" } });
+			if (bestMatch) {
+				verified = 1;
+				flagReason = null;
+				activeLocationName = bestMatch.loc.name;
+				closestDistance = bestMatch.dist; 
 			} else {
-				return new Response(`<div class='text-amber-600 font-bold text-lg mb-2'>⚠️ ${actionText} Flagged</div><div class='text-gray-500 text-sm'>${employee.full_name}</div><div class='text-gray-600 text-xs mt-2'>Failed checks: ${flagReason}. Logged for review.</div>`, { headers: { "Content-Type": "text/html" } });
+				flagReason = `GPS: ${Math.round(closestDistance)}m from nearest office | IP: ${ipAddress}`;
+			}
+
+			await db.prepare("INSERT INTO attendance_logs (emp_number, action_type, latitude, longitude, ip_address, verified, flag_reason, distance_meters) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(empNumber, actionType, lat, lon, ipAddress, verified, flagReason, Math.round(closestDistance)).run();
+			
+			if (verified === 1) {
+				return new Response(`<span class="text-green-600 font-bold">Success! Refreshing...</span>`, { headers: { "Content-Type": "text/html", "HX-Refresh": "true" } });
+			} else {
+				return new Response(`<span class="text-red-600 font-bold text-sm text-center block">Failed checks: ${flagReason}.<br>Logged for review.</span>`, { headers: { "Content-Type": "text/html" } });
 			}
 		}
 
+		// --- POST EXCEPTION: Leave / Workshop Logic ---
 		if (url.pathname === "/api/exception" && request.method === "POST") {
 			const formData = await request.formData();
-			const employee = await db.prepare("SELECT * FROM employees WHERE device_token = ? AND status = 'active'").bind(deviceToken).first();
-			if (!employee) return new Response("<span class='text-red-600 font-bold'>Account inactive.</span>");
-			await db.prepare("INSERT INTO status_exceptions (emp_number, type, start_date, end_date, description, notified_person) VALUES (?, ?, ?, ?, ?, ?)").bind(employee.emp_number, formData.get("type"), formData.get("start_date"), formData.get("end_date"), formData.get("description") || null, formData.get("notified_person") || null).run();
-			return new Response(`<div class='text-blue-600 font-bold'>✅ Logged!</div><button onclick="location.reload()" class="mt-2 text-sm text-blue-500 underline">Refresh</button>`, { headers: { "Content-Type": "text/html" } });
+			const type = formData.get("type");
+			const startDate = formData.get("start_date");
+			const endDate = formData.get("end_date");
+			const description = formData.get("description") || null;
+
+			if (!deviceToken) return new Response("Unauthorized device.", { status: 401 });
+			const emp = await db.prepare("SELECT * FROM employees WHERE device_token = ? AND status = 'active'").bind(deviceToken).first();
+			if (!emp) return new Response("Invalid or terminated employee.", { status: 403 });
+
+			await db.prepare("INSERT INTO status_exceptions (emp_number, type, start_date, end_date, notified_person, description) VALUES (?, ?, ?, ?, ?, ?)")
+				.bind(emp.emp_number, type, startDate, endDate, 'System', description).run();
+			
+			return new Response(`<span class="text-green-600 font-bold">Status Submitted. Refreshing...</span>`, { headers: { "Content-Type": "text/html", "HX-Refresh": "true" } });
+		}
+
+		// --- ADMIN ROUTES ---
+		if (url.pathname.startsWith("/admin")) {
+			return handleAdmin(request, env, url);
 		}
 
 		return new Response("Not Found", { status: 404 });
-	},
-
-	// --- AUTOMATED DATA SCRUBBER (CRON JOB) ---
-	async scheduled(event, env, ctx) {
-		const db = env.office_attendance_db;
-		
-		// Retain data for 1 full year (365 days)
-		await db.prepare(`DELETE FROM attendance_logs WHERE (julianday('now') - julianday(timestamp)) > 365`).run();
-		await db.prepare(`DELETE FROM status_exceptions WHERE (julianday('now') - julianday(created_at)) > 365`).run();
-		await db.prepare(`DELETE FROM admin_audit_logs WHERE (julianday('now') - julianday(timestamp)) > 365`).run();
-		
-		console.log("365-day data scrub executed successfully.");
 	}
 };
 
 function calculateDistance(lat1, lon1, lat2, lon2) {
 	const R = 6371e3; 
-	const φ1 = lat1 * Math.PI / 180;
-	const φ2 = lat2 * Math.PI / 180;
-	const Δφ = (lat2 - lat1) * Math.PI / 180;
-	const Δλ = (lon2 - lon1) * Math.PI / 180;
-	const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-	return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+	const p1 = lat1 * Math.PI/180;
+	const p2 = lat2 * Math.PI/180;
+	const dp = (lat2-lat1) * Math.PI/180;
+	const dl = (lon2-lon1) * Math.PI/180;
+
+	const a = Math.sin(dp/2) * Math.sin(dp/2) +
+			Math.cos(p1) * Math.cos(p2) *
+			Math.sin(dl/2) * Math.sin(dl/2);
+	const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+	return R * c; 
 }
 
-function getAppHTML(viewState, nonce, hasSignedInToday = false, activeException = null) {
+function getAppHTML(viewState, nonce, hasSignedInToday = false, activeException = null, hasSignedOutToday = false) {
 	const registerForm = `
 		<h1 class="text-2xl font-bold mb-2 text-gray-800">Device Registration</h1>
 		<form hx-post="/api/register" hx-target="#form-container" class="space-y-4 text-left">
@@ -239,7 +236,6 @@ function getAppHTML(viewState, nonce, hasSignedInToday = false, activeException 
 
 	let attendanceForm = '';
 
-	// IF EXCEPTION IS ACTIVE: Render locked UI
 	if (activeException) {
 		attendanceForm = `
 			<h1 class="text-2xl font-bold mb-4 text-gray-800">Status: Out of Office</h1>
@@ -255,7 +251,6 @@ function getAppHTML(viewState, nonce, hasSignedInToday = false, activeException 
 			<p class="text-xs text-gray-500 mt-4">Attendance and leave requests are disabled until this period expires.</p>
 		`;
 	} else {
-		// IF NO EXCEPTION: Render standard logging UI
 		const eatDate = new Date(new Date().toLocaleString("en-US", {timeZone: "Africa/Nairobi"}));
 		const hour = eatDate.getHours();
 		
@@ -263,23 +258,58 @@ function getAppHTML(viewState, nonce, hasSignedInToday = false, activeException 
 		const canSignOut = hour >= 17 || hour < 4;
 
 		let actionButtonsHTML = '';
-		let statusHintHTML = '';
+		const showExceptionForm = !hasSignedInToday && !hasSignedOutToday;
 
 		if (canSignIn) {
 			if (hasSignedInToday) {
-				actionButtonsHTML = `<div class="w-full bg-gray-100 text-gray-500 px-2 py-4 rounded-lg font-bold shadow-inner border text-center">Already Signed In Today</div>`;
-				statusHintHTML = `<p class="text-xs text-gray-500 mt-3 text-center">Sign-out will become available at 17:00 EAT.</p>`;
+				actionButtonsHTML = `
+					<div class="w-full bg-green-50 text-green-800 px-4 py-8 rounded-xl font-bold shadow-sm border border-green-200 text-center flex flex-col items-center gap-2">
+						<svg class="w-12 h-12 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+						<span class="text-xl tracking-tight">Successfully Signed In</span>
+						<span class="text-sm font-normal mt-1 text-green-600">Sign-out will become available at 17:00 EAT.</span>
+					</div>`;
 			} else {
-				actionButtonsHTML = `<button onclick="logLocation('SIGN_IN')" class="bg-green-600 text-white px-2 py-4 rounded-lg font-bold hover:bg-green-700 w-full shadow-lg transition-transform active:scale-95">SIGN IN</button>`;
+				actionButtonsHTML = `<button onclick="logLocation('SIGN_IN')" class="bg-green-600 text-white px-2 py-5 rounded-xl font-bold text-xl hover:bg-green-700 w-full shadow-lg transition-transform active:scale-95">SIGN IN</button>`;
 			}
 		} else if (canSignOut) {
-			actionButtonsHTML = `<button onclick="logLocation('SIGN_OUT')" class="bg-red-600 text-white px-2 py-4 rounded-lg font-bold hover:bg-red-700 w-full shadow-lg transition-transform active:scale-95">SIGN OUT</button>`;
-			statusHintHTML = `<p class="text-xs text-gray-500 mt-3 text-center">Sign-in for the next shift becomes available at 04:00 EAT.</p>`;
+			if (hasSignedOutToday) {
+				actionButtonsHTML = `
+					<div class="w-full bg-gray-50 text-gray-700 px-4 py-8 rounded-xl font-bold shadow-sm border border-gray-200 text-center flex flex-col items-center gap-2">
+						<svg class="w-12 h-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+						<span class="text-xl tracking-tight">Shift Complete</span>
+						<span class="text-sm font-normal mt-1 text-gray-500">Next sign-in available at 04:00 EAT.</span>
+					</div>`;
+			} else {
+				actionButtonsHTML = `<button onclick="logLocation('SIGN_OUT')" class="bg-red-600 text-white px-2 py-5 rounded-xl font-bold text-xl hover:bg-red-700 w-full shadow-lg transition-transform active:scale-95">SIGN OUT</button>`;
+			}
+		}
+
+		let exceptionSectionHTML = '';
+		if (showExceptionForm) {
+			exceptionSectionHTML = `
+				<hr class="my-6 border-gray-200">
+				<div id="exception-section" class="text-left bg-gray-50 p-4 rounded-lg border border-gray-200">
+					<h2 class="text-lg font-bold text-gray-800 mb-2">Out of Office / Leave</h2>
+					<form hx-post="/api/exception" hx-target="#exception-section" class="space-y-3">
+						<select name="type" required class="shadow border rounded w-full py-2 px-3 text-sm bg-white">
+							<option value="Workshop/Inspection">Workshop / Inspection</option>
+							<option value="Sick Leave">Sick Leave</option>
+							<option value="Annual Leave">Annual / Work Leave</option>
+						</select>
+						<div class="flex gap-4">
+							<input type="date" name="start_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
+							<input type="date" name="end_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
+						</div>
+						<input type="text" name="description" class="shadow border rounded w-full py-2 px-3 text-sm" placeholder="Description or Notified Person">
+						<button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold w-full text-sm mt-2 hover:bg-blue-700 transition-colors">Submit Status</button>
+					</form>
+				</div>
+			`;
 		}
 
 		attendanceForm = `
 			<h1 class="text-2xl font-bold mb-4 text-gray-800">Office Attendance</h1>
-			<div id="status-message" class="mb-4 text-gray-600 text-sm h-12 flex items-center justify-center">Ensure you are connected to the office Wi-Fi and allow location access.</div>
+			<div id="status-message" class="mb-4 text-gray-600 text-sm min-h-[3rem] flex items-center justify-center">Ensure you are connected to the office Wi-Fi and allow location access.</div>
 			
 			<form id="attendance-form" hx-post="/api/log" hx-target="#status-message" class="hidden">
 				<input type="hidden" name="auth_nonce" value="${nonce}">
@@ -291,26 +321,8 @@ function getAppHTML(viewState, nonce, hasSignedInToday = false, activeException 
 			<div class="w-full mt-2">
 				${actionButtonsHTML}
 			</div>
-			${statusHintHTML}
 			
-			<hr class="my-6 border-gray-200">
-
-			<div id="exception-section" class="text-left bg-gray-50 p-4 rounded-lg border border-gray-200">
-				<h2 class="text-lg font-bold text-gray-800 mb-2">Out of Office / Leave</h2>
-				<form hx-post="/api/exception" hx-target="#exception-section" class="space-y-3">
-					<select name="type" required class="shadow border rounded w-full py-2 px-3 text-sm bg-white">
-						<option value="Workshop/Inspection">Workshop / Inspection</option>
-						<option value="Sick Leave">Sick Leave</option>
-						<option value="Annual Leave">Annual / Work Leave</option>
-					</select>
-					<div class="flex gap-4">
-						<input type="date" name="start_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
-						<input type="date" name="end_date" required class="shadow border rounded w-1/2 py-1 px-2 text-sm">
-					</div>
-					<input type="text" name="description" class="shadow border rounded w-full py-2 px-3 text-sm" placeholder="Description or Notified Person">
-					<button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold w-full text-sm mt-2">Submit Status</button>
-				</form>
-			</div>
+			${exceptionSectionHTML}
 		`;
 	}
 

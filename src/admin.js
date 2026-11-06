@@ -13,9 +13,12 @@ export async function handleAdmin(request, env, url) {
 		const auditLogs = await db.prepare("SELECT * FROM admin_audit_logs ORDER BY timestamp DESC LIMIT 30").all();
 		const logs = await db.prepare(`SELECT l.*, e.full_name, e.division FROM attendance_logs l JOIN employees e ON l.emp_number = e.emp_number ORDER BY l.timestamp DESC LIMIT 150`).all();
 		const exceptions = await db.prepare("SELECT * FROM status_exceptions").all();
-		
+
 		return new Response(getAdminHTML(locations.results, logs.results, employees.results, exceptions.results, auditLogs.results), {
-			headers: { "Content-Type": "text/html;charset=UTF-8" },
+			headers: { 
+				"Content-Type": "text/html;charset=UTF-8",
+				"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
+			},
 		});
 	}
 
@@ -172,11 +175,35 @@ export async function handleAdmin(request, env, url) {
 		return new Response(csvContent, { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="Attendance_${filenameTarget}_${startDateStr}_to_${endDateStr}.csv"` } });
 	}
 
+	// --- 3. ADD/EDIT LOCATION WITH VALIDATION ---
 	if (url.pathname === "/admin/location" && request.method === "POST") {
 		const formData = await request.formData();
-		await db.prepare("INSERT INTO office_locations (name, latitude, longitude, radius_meters, allowed_ips) VALUES (?, ?, ?, ?, ?)").bind(formData.get("name"), parseFloat(formData.get("latitude")), parseFloat(formData.get("longitude")), parseInt(formData.get("radius")), formData.get("allowed_ips").trim()).run();
-		await db.prepare("INSERT INTO admin_audit_logs (action, target_employee, details) VALUES (?, ?, ?)").bind("ADD_LOCATION", "SYSTEM", `Added office: ${formData.get("name")}`).run();
-		return new Response("<span class='text-green-600 font-bold'>Location added. Refreshing...</span>", { headers: { "Content-Type": "text/html", "HX-Refresh": "true" }});
+		const id = formData.get("loc_id");
+		const name = formData.get("name").trim();
+		const lat = parseFloat(formData.get("latitude"));
+		const lon = parseFloat(formData.get("longitude"));
+		const radius = parseInt(formData.get("radius"));
+		const allowedIps = formData.get("allowed_ips").trim();
+
+		if (radius > 100) {
+			return new Response("<span class='text-red-600 font-bold block mb-2'>Error: Radius cannot exceed 100 meters.</span>", { status: 400 });
+		}
+
+		if (id) {
+			const existing = await db.prepare("SELECT * FROM office_locations WHERE (name = ? OR (latitude = ? AND longitude = ?)) AND id != ?").bind(name, lat, lon, id).first();
+			if (existing) return new Response(`<span class='text-red-600 font-bold block mb-2'>Error: Location "${name}" or these exact coordinates already exist.</span>`, { status: 400 });
+			
+			await db.prepare("UPDATE office_locations SET name = ?, latitude = ?, longitude = ?, radius_meters = ?, allowed_ips = ? WHERE id = ?").bind(name, lat, lon, radius, allowedIps, id).run();
+			await db.prepare("INSERT INTO admin_audit_logs (action, target_employee, details) VALUES (?, ?, ?)").bind("EDIT_LOCATION", "SYSTEM", `Edited office: ${name}`).run();
+		} else {
+			const existing = await db.prepare("SELECT * FROM office_locations WHERE name = ? OR (latitude = ? AND longitude = ?)").bind(name, lat, lon).first();
+			if (existing) return new Response(`<span class='text-red-600 font-bold block mb-2'>Error: Location "${name}" or these exact coordinates already exist.</span>`, { status: 400 });
+			
+			await db.prepare("INSERT INTO office_locations (name, latitude, longitude, radius_meters, allowed_ips) VALUES (?, ?, ?, ?, ?)").bind(name, lat, lon, radius, allowedIps).run();
+			await db.prepare("INSERT INTO admin_audit_logs (action, target_employee, details) VALUES (?, ?, ?)").bind("ADD_LOCATION", "SYSTEM", `Added office: ${name}`).run();
+		}
+
+		return new Response("<span class='text-green-600 font-bold'>Saved successfully. Refreshing...</span>", { headers: { "Content-Type": "text/html", "HX-Refresh": "true" }});
 	}
 
 	if (url.pathname === "/admin/location/delete" && request.method === "POST") {
@@ -292,13 +319,16 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 			<td class="p-3 text-xs font-mono">${emp.emp_number}</td>
 			<td class="p-3 flex gap-2">
 				${emp.status === 'active' ? `
-					<button hx-post="/admin/detach" hx-vals='{"emp_number": "${emp.emp_number}", "emp_name": "${emp.full_name}"}' class="bg-amber-500 text-white px-2 py-1 rounded text-xs hover:bg-amber-600">Detach</button>
-					<button hx-post="/admin/terminate" hx-vals='{"emp_number": "${emp.emp_number}", "emp_name": "${emp.full_name}"}' hx-confirm="Terminate ${emp.full_name}?" class="bg-red-600 text-white px-2 py-1 rounded text-xs hover:bg-red-700">Terminate</button>
+					${emp.device_token ? 
+						`<button hx-post="/admin/detach" hx-vals='{"emp_number": "${emp.emp_number}", "emp_name": "${emp.full_name.replace(/'/g, "\\'")}"}' class="bg-amber-500 text-white px-2 py-1 rounded text-xs font-bold hover:bg-amber-600 transition-colors">Detach</button>` 
+					: 
+						`<span class="bg-gray-200 text-gray-500 px-2 py-1 rounded text-xs font-bold cursor-not-allowed border border-gray-300">Detached</span>`
+					}
+					<button hx-post="/admin/terminate" hx-vals='{"emp_number": "${emp.emp_number}", "emp_name": "${emp.full_name.replace(/'/g, "\\'")}"}' hx-confirm="Terminate ${emp.full_name}?" class="bg-red-600 text-white px-2 py-1 rounded text-xs font-bold hover:bg-red-700 transition-colors">Terminate</button>
 				` : `<span class="text-red-500 text-xs font-bold">Terminated</span>`}
 			</td>
 		</tr>
 	`).join('');
-
 	const auditRowsHTML = auditLogs.map(log => `
 		<tr class="border-b text-sm">
 			<td class="p-2 whitespace-nowrap">${new Date(log.timestamp + 'Z').toLocaleString("en-US", {timeZone: "Africa/Nairobi"})}</td>
@@ -317,9 +347,10 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 					<span class="text-xs text-gray-500 block">GPS: ${loc.latitude}, ${loc.longitude}</span>
 					<span class="text-xs text-gray-500 block truncate" title="${loc.allowed_ips}">IP: ${loc.allowed_ips}</span>
 				</div>
-				<button hx-post="/admin/location/delete" hx-vals='{"id": "${loc.id}", "name": "${loc.name}"}' hx-confirm="Are you sure you want to delete the ${loc.name} location?" class="bg-red-100 text-red-600 px-3 py-1 rounded text-xs font-bold hover:bg-red-200 transition-colors shrink-0">
-					Delete
-				</button>
+				<div class="flex flex-col gap-2 shrink-0">
+					<button onclick="editLocation('${loc.id}', '${loc.name.replace(/'/g, "\\'")}', ${loc.latitude}, ${loc.longitude}, ${loc.radius_meters}, '${loc.allowed_ips}')" class="bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-bold hover:bg-blue-200 transition-colors">Edit</button>
+					<button hx-post="/admin/location/delete" hx-vals='{"id": "${loc.id}", "name": "${loc.name.replace(/'/g, "\\'")}"}' hx-confirm="Are you sure you want to delete ${loc.name}?" class="bg-red-100 text-red-600 px-3 py-1 rounded text-xs font-bold hover:bg-red-200 transition-colors">Delete</button>
+				</div>
 			</div>
 		</div>
 	`).join('');
@@ -346,8 +377,21 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 				document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
 				document.getElementById(tabId).classList.add('active');
 				document.getElementById('btn-' + tabId).classList.add('active');
+				
+				// Save the currently active tab to the browser's local memory
+				localStorage.setItem('activeAdminTab', tabId);
+				
 				toggleMobileMenu(true);
 			}
+
+			// When the page reloads, automatically jump back to the saved tab
+			document.addEventListener("DOMContentLoaded", () => {
+				const savedTab = localStorage.getItem('activeAdminTab');
+				if (savedTab && document.getElementById(savedTab)) {
+					switchTab(savedTab);
+				}
+			});
+
 			function toggleMobileMenu(forceClose = false) {
 				const sidebar = document.getElementById('sidebar');
 				if (forceClose) {
@@ -357,9 +401,23 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 				}
 			}
 			async function autoGatherNetwork() {
+				// Detect if the user is on a mobile device
+				const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+				
+				if (!isMobile) {
+					alert("Action Blocked: Please log into the Admin Dashboard using a smartphone to use Auto-Gather. Laptops use Wi-Fi triangulation which causes severe GPS drift and corrupts the geofence boundaries.");
+					return;
+				}
+
 				const btn = document.getElementById('gather-btn');
 				btn.innerText = "Gathering...";
-				try { document.getElementById('loc_ip').value = await (await fetch('/api/my-ip')).text(); } catch(e) {}
+				
+				try { 
+					const rawIp = await (await fetch('/api/my-ip')).text();
+					const wildcardIp = rawIp.includes('.') ? rawIp.split('.').slice(0, 3).join('.') + '.*' : rawIp;
+					document.getElementById('loc_ip').value = wildcardIp; 
+				} catch(e) {}
+				
 				if (navigator.geolocation) {
 					navigator.geolocation.getCurrentPosition(pos => {
 						document.getElementById('loc_lat').value = pos.coords.latitude;
@@ -374,12 +432,38 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 					btn.innerText = "Geolocation not supported";
 				}
 			}
+			function editLocation(id, name, lat, lon, radius, ips) {
+				document.getElementById('loc_id').value = id;
+				document.getElementById('loc_name').value = name;
+				document.getElementById('loc_lat').value = lat;
+				document.getElementById('loc_lon').value = lon;
+				document.getElementById('loc_radius').value = radius;
+				document.getElementById('loc_ip').value = ips;
+				
+				document.getElementById('form-title').innerText = "Edit Location";
+				document.getElementById('submit-btn').innerText = "Update Rule";
+				document.getElementById('cancel-btn').classList.remove('hidden');
+			}
+			function cancelEdit() {
+				document.getElementById('loc_id').value = '';
+				document.getElementById('loc_name').value = '';
+				document.getElementById('loc_lat').value = '';
+				document.getElementById('loc_lon').value = '';
+				document.getElementById('loc_radius').value = '40';
+				document.getElementById('loc_ip').value = '';
+				
+				document.getElementById('form-title').innerText = "Add New Location";
+				document.getElementById('submit-btn').innerText = "Save Rule";
+				document.getElementById('cancel-btn').classList.add('hidden');
+				document.getElementById('location-error-target').innerHTML = '';
+			}
 			document.addEventListener('keydown', function(event){
 				if(event.key === "Escape") document.getElementById('calendar-modal').classList.add('hidden');
 			});
 		</script>
 	</head>
-<body class="bg-gray-100 flex flex-col md:flex-row h-[100dvh] overflow-hidden overscroll-none">		
+	<body class="bg-gray-100 flex flex-col md:flex-row h-[100dvh] overflow-hidden overscroll-none">
+		
 		<!-- Mobile Header -->
 		<div class="md:hidden bg-gray-950 text-white flex justify-between items-center p-4 z-20 shadow-md">
 			<div class="font-bold text-lg tracking-tight">ICT HR Portal</div>
@@ -411,7 +495,8 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 		</aside>
 
 		<!-- Main Content -->
-<main class="flex-1 overflow-y-auto p-4 md:p-8 relative w-full pb-24 overscroll-contain">			
+		<main class="flex-1 overflow-y-auto p-4 md:p-8 relative w-full pb-24 overscroll-contain">
+			
 			<div id="view-daily" class="view-section active space-y-4 md:space-y-6">
 				<div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-2">
 					<h1 class="text-xl md:text-2xl font-bold text-gray-800">Today's Activity</h1>
@@ -507,19 +592,39 @@ function getAdminHTML(locations, logs, employees, exceptions, auditLogs) {
 						${locationRows || '<div class="text-gray-500 text-sm mt-4">No active locations set.</div>'}
 					</div>
 					<div class="bg-white p-4 md:p-6 rounded-xl shadow h-auto md:h-[32rem] flex flex-col">
-						<h2 class="text-lg font-bold mb-4">Add New Location</h2>
+						<h2 id="form-title" class="text-lg font-bold mb-4">Add New Location</h2>
 						<button id="gather-btn" type="button" onclick="autoGatherNetwork()" class="mb-4 w-full bg-gray-800 text-white text-xs font-bold py-3 rounded shadow hover:bg-gray-700 transition-colors">
 							Auto-Gather Current GPS & IP
 						</button>
-						<form hx-post="/admin/location" class="space-y-4 text-sm flex-1">
-							<input type="text" name="name" placeholder="Office Name (e.g. Field Office 2)" required class="border p-3 w-full rounded">
-							<div class="flex flex-col sm:flex-row gap-2 sm:gap-4">
-								<input type="number" step="any" id="loc_lat" name="latitude" placeholder="Latitude" required class="border p-3 w-full sm:w-1/2 rounded bg-gray-50">
-								<input type="number" step="any" id="loc_lon" name="longitude" placeholder="Longitude" required class="border p-3 w-full sm:w-1/2 rounded bg-gray-50">
+						<form hx-post="/admin/location" hx-target="#location-error-target" class="space-y-4 text-sm flex-1">
+							<input type="hidden" name="loc_id" id="loc_id">
+							<div>
+								<label class="block text-gray-700 text-xs font-bold mb-1">Office Name</label>
+								<input type="text" id="loc_name" name="name" placeholder="e.g. Bruce House B" required class="border p-3 w-full rounded">
 							</div>
-							<input type="number" name="radius" placeholder="Radius (Meters)" value="50" required class="border p-3 w-full rounded">
-							<input type="text" id="loc_ip" name="allowed_ips" placeholder="Router IP" required class="border p-3 w-full rounded bg-gray-50">
-							<button type="submit" class="bg-blue-600 text-white px-4 py-3 rounded font-bold w-full hover:bg-blue-700 shadow mt-2">Save Location Rule</button>
+							<div class="flex flex-col sm:flex-row gap-2 sm:gap-4">
+								<div class="w-full sm:w-1/2">
+									<label class="block text-gray-700 text-xs font-bold mb-1">Latitude</label>
+									<input type="number" step="any" id="loc_lat" name="latitude" required class="border p-3 w-full rounded bg-gray-50">
+								</div>
+								<div class="w-full sm:w-1/2">
+									<label class="block text-gray-700 text-xs font-bold mb-1">Longitude</label>
+									<input type="number" step="any" id="loc_lon" name="longitude" required class="border p-3 w-full rounded bg-gray-50">
+								</div>
+							</div>
+							<div>
+								<label class="block text-gray-700 text-xs font-bold mb-1">Geofence Radius (Meters) - Max 100</label>
+								<input type="number" id="loc_radius" name="radius" value="40" max="100" required class="border p-3 w-full rounded">
+							</div>
+							<div>
+								<label class="block text-gray-700 text-xs font-bold mb-1">Router IP (Uses * for subnet)</label>
+								<input type="text" id="loc_ip" name="allowed_ips" required class="border p-3 w-full rounded bg-gray-50">
+							</div>
+							<div id="location-error-target"></div>
+							<div class="flex gap-2 mt-2">
+								<button type="submit" id="submit-btn" class="bg-blue-600 text-white px-4 py-3 rounded font-bold w-full hover:bg-blue-700 shadow">Save Rule</button>
+								<button type="button" onclick="cancelEdit()" id="cancel-btn" class="hidden bg-gray-400 text-white px-4 py-3 rounded font-bold w-1/3 hover:bg-gray-500 shadow">Cancel</button>
+							</div>
 						</form>
 					</div>
 				</div>
